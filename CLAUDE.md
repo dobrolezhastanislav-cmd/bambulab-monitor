@@ -23,14 +23,29 @@ Standalone Python worker that watches the printer via Bambu Lab's cloud MQTT and
 - `Procfile` — `worker: python printer_monitor.py`
 
 ## Environment variables (set in Railway → Variables)
+
+User logs into Bambu Lab via Google SSO — no Bambu password exists. Use **Mode A**.
+
+**Mode A — Token (active setup):**
 | Variable | Description |
 |---|---|
-| `BAMBU_EMAIL` | Bambu Lab account email |
-| `BAMBU_PASSWORD` | Bambu Lab account password |
+| `BAMBU_TOKEN` | JWT access token extracted from browser (expires ~90 days) |
+| `BAMBU_USERNAME` | Bambu username from same response (e.g. `u_xxxxxxxxxxxxxxxx`) |
 | `PRINTER_SERIAL` | Printer serial (touchscreen → Settings → Device Info) |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token |
 | `TELEGRAM_CHAT_ID` | User's personal Telegram numeric ID |
 | `BAMBU_REGION` | `us` (default), `eu`, or `cn` |
+
+**Mode B — Email/password (not usable — Google SSO account).**
+
+### How to extract the token (repeat every ~90 days)
+1. Open **bambulab.com** in Chrome
+2. Open DevTools → **Network** tab → check **Preserve log**
+3. Log in with Google
+4. In the Network tab filter by `login` — find the request to `api.bambulab.com`
+5. Click it → **Response** tab → copy `accessToken` → set as `BAMBU_TOKEN`
+6. Copy `username` → set as `BAMBU_USERNAME`
+7. Save in Railway → service redeploys automatically
 
 No `.env` file — all config is Railway env vars only.
 

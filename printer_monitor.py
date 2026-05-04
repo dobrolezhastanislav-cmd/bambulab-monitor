@@ -1,17 +1,22 @@
 """
 Bambu Lab X1C — Unexpected Shutdown Monitor (Railway / cloud version)
 ======================================================================
-Connects to Bambu Lab's CLOUD MQTT broker using your account credentials.
-Works from any machine including Railway — no local network access needed.
+Connects to Bambu Lab's CLOUD MQTT broker.
+Supports two auth modes:
 
-Setup:
-  Set these environment variables (Railway → Variables tab):
-    BAMBU_EMAIL         your Bambu Lab account email
-    BAMBU_PASSWORD      your Bambu Lab account password
+  Mode A — Token (for Google SSO accounts, recommended):
+    BAMBU_TOKEN     JWT token extracted from browser (see CLAUDE.md for how-to)
+    BAMBU_USERNAME  username from same response (looks like u_xxxxxxxxxxxxxxxx)
+
+  Mode B — Email/password (for accounts with a Bambu password):
+    BAMBU_EMAIL     your Bambu Lab account email
+    BAMBU_PASSWORD  your Bambu Lab account password
+
+  Always required:
     PRINTER_SERIAL      serial number (touchscreen → Settings → Device Info)
     TELEGRAM_BOT_TOKEN  your bot token
     TELEGRAM_CHAT_ID    your personal Telegram numeric ID (@userinfobot)
-    BAMBU_REGION        "us" or "eu" or "cn"  (default: "us")
+    BAMBU_REGION        "us" / "eu" / "cn"  (default: "us")
 
 Requirements:
     pip install paho-mqtt requests
@@ -25,16 +30,14 @@ import logging
 import requests
 import paho.mqtt.client as mqtt
 
-# ── logging ──────────────────────────────────────────────────────────────────
+# ── logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)s  %(message)s",
 )
 log = logging.getLogger(__name__)
 
-# ── config from env vars ─────────────────────────────────────────────────────
-BAMBU_EMAIL        = os.environ["BAMBU_EMAIL"]
-BAMBU_PASSWORD     = os.environ["BAMBU_PASSWORD"]
+# ── config ────────────────────────────────────────────────────────────────────
 PRINTER_SERIAL     = os.environ["PRINTER_SERIAL"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
@@ -42,42 +45,47 @@ REGION             = os.environ.get("BAMBU_REGION", "us")
 
 MQTT_HOST          = f"{REGION}.mqtt.bambulab.com"
 MQTT_PORT          = 8883
-AUTH_URL           = "https://api.bambulab.com/v1/user-service/user/login"
+RECONNECT_DELAY    = 30
 
-RECONNECT_DELAY    = 30   # seconds between reconnect attempts
-
-# ── print states ─────────────────────────────────────────────────────────────
+# ── print states ──────────────────────────────────────────────────────────────
 ACTIVE_STATES   = {"PREPARE", "RUNNING", "PAUSE"}
 FINISHED_STATES = {"FINISH", "FAILED"}
 
-# ── shared state ─────────────────────────────────────────────────────────────
 _was_printing = False
 
 
-# ── Bambu auth ────────────────────────────────────────────────────────────────
-def bambu_login() -> tuple[str, str]:
-    """Returns (mqtt_username, jwt_token). Raises on failure."""
-    log.info("Authenticating with Bambu Lab cloud…")
-    r = requests.post(
-        AUTH_URL,
-        json={"account": BAMBU_EMAIL, "password": BAMBU_PASSWORD},
-        timeout=15,
-    )
-    r.raise_for_status()
-    data = r.json()
+# ── auth ──────────────────────────────────────────────────────────────────────
+def get_credentials() -> tuple[str, str]:
+    """Returns (mqtt_username, jwt_token)."""
 
-    # If the account has 2-factor auth enabled, the API returns a tfaKey
-    if data.get("tfaKey"):
-        raise RuntimeError(
-            "Your Bambu Lab account has 2FA enabled. "
-            "Disable 2FA temporarily, or create a separate Bambu account "
-            "without 2FA and add the printer to it for monitoring."
+    # Mode A: token provided directly (Google SSO accounts)
+    token    = os.environ.get("BAMBU_TOKEN")
+    username = os.environ.get("BAMBU_USERNAME")
+    if token and username:
+        log.info("Using provided token for user %s", username)
+        return username, token
+
+    # Mode B: email + password login
+    email    = os.environ.get("BAMBU_EMAIL")
+    password = os.environ.get("BAMBU_PASSWORD")
+    if email and password:
+        log.info("Authenticating with email/password…")
+        r = requests.post(
+            "https://api.bambulab.com/v1/user-service/user/login",
+            json={"account": email, "password": password},
+            timeout=15,
         )
+        r.raise_for_status()
+        data = r.json()
+        if data.get("tfaKey"):
+            raise RuntimeError("Bambu account has 2FA — disable it or use token mode.")
+        log.info("Logged in as %s", data["username"])
+        return data["username"], data["accessToken"]
 
-    token    = data["accessToken"]
-    username = data["username"]          # looks like "u_xxxxxxxxxxxxxxxx"
-    log.info("Logged in as %s", username)
-    return username, token
+    raise RuntimeError(
+        "No auth configured. Set either BAMBU_TOKEN+BAMBU_USERNAME "
+        "or BAMBU_EMAIL+BAMBU_PASSWORD."
+    )
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
@@ -108,19 +116,15 @@ def on_message(client, userdata, msg):
         state = data.get("print", {}).get("gcode_state")
         if not state:
             return
-
         log.debug("Printer state: %s", state)
-
         if state in ACTIVE_STATES:
             if not _was_printing:
                 log.info("Print started (%s) — watching for unexpected shutdown.", state)
             _was_printing = True
-
         elif state in FINISHED_STATES:
             if _was_printing:
                 log.info("Print finished normally (%s).", state)
             _was_printing = False
-
     except Exception as exc:
         log.debug("Could not parse MQTT message: %s", exc)
 
@@ -144,7 +148,7 @@ def main():
 
     while True:
         try:
-            username, token = bambu_login()
+            username, token = get_credentials()
         except Exception as exc:
             log.error("Auth failed: %s — retrying in %ds", exc, RECONNECT_DELAY)
             time.sleep(RECONNECT_DELAY)
